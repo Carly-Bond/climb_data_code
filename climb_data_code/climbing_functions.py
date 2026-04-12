@@ -1,3 +1,25 @@
+# import packages
+from bs4 import BeautifulSoup # https://beautiful-soup-4.readthedocs.io/en/latest/
+import copy
+from datetime import datetime
+import gender_guesser.detector as gender
+import io
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+import pandas as pd
+import pickle
+import requests # https://requests.readthedocs.io/en/latest/
+import time
+import urllib.parse
+
+
+
+HEADERS = {'User-Agent': 'Independent research project - contact: carlybond907@gmail.com'}
+
+
+
+
 # Define functions
 
 
@@ -16,16 +38,25 @@ def retrieve_overview_csv(URL):
       return_type: pandas dataframe
   """
 
-  csv_export_request = requests.get(URL)
+  csv_export_request = requests.get(URL, headers=HEADERS)
 
-  if csv_export_request.status_code == 200:
-    csv_df = pd.read_csv(io.StringIO(csv_export_request.text))
-    print("CSV converted to pandas df")
-  else:
+  if csv_export_request.status_code != 200:
     print("Something went wrong. Status code is: " + str(csv_export_request.status_code))
+    return pd.DataFrame()
+
+  if not csv_export_request.text.strip().startswith('Route'):
+    print("Response does not look like a CSV. Mountain Project may have returned an HTML page.")
+    print("First 500 chars of response:")
+    print(csv_export_request.text[:500])
+    return pd.DataFrame()
+
+  csv_df = pd.read_csv(io.StringIO(csv_export_request.text))
+  print("CSV converted to pandas df")
 
 
-  csv_df[['Route Grade', 'Route Danger Rating']] = csv_df['Rating'].str.split(' ', expand=True)
+  csv_df['YDS']                 = csv_df['Rating'].str.extract(r'(5\.\d+[+-]?)', expand=False)
+  csv_df['V-grade']             = csv_df['Rating'].str.extract(r'(V\d+(?:[+-]\d*)?)', expand=False)
+  csv_df['Route Danger Rating'] = csv_df['Rating'].str.extract(r'\b(PG-?13|[RX])\b', expand=False)
 
   return csv_df
 
@@ -74,10 +105,13 @@ def get_route_stats(URL, stat_type, params = {'per_page': '250','page': '1',}, r
     req_URL = prefix + URL.split('/')[-2] + "/" + stat_type
     wait = backoff
     for attempt in range(retries):
-      response = requests.get(req_URL, params=params, headers=HEADERS)
-      if response.status_code == 200 and response.text.strip():
-        return pd.json_normalize(response.json()['data'])
-      print(f"Attempt {attempt + 1} failed ({response.status_code}) for {req_URL}, retrying in {wait}s...")
+      try:
+        response = requests.get(req_URL, params=params, headers=HEADERS)
+        if response.status_code == 200 and response.text.strip():
+          return pd.json_normalize(response.json()['data'])
+        print(f"Attempt {attempt + 1} failed ({response.status_code}) for {req_URL}, retrying in {wait}s...")
+      except requests.exceptions.RequestException as e:
+        print(f"Attempt {attempt + 1} failed ({type(e).__name__}) for {req_URL}, retrying in {wait}s...")
       time.sleep(wait)
       wait *= 2
     print(f"All {retries} attempts failed for {req_URL}. Returning empty DataFrame.")
@@ -125,7 +159,7 @@ def create_route_stats_df(route_name, star_df, rating_df, tick_df, prefix_col = 
     tick_df['user.id'] = tick_df['user.id'].astype('Int64')
   if 'comment' in tick_df.columns:
     #tick_df['comment'] = tick_df['text'].str.split(".", n = 1, expand = True).iloc[:, 1:]
-    tick_df['comment'] = tick_df['text'].str.split(".", n = 1, expand = True).get(1)
+    tick_df['comment'] = tick_df['text'].astype(str).str.split(".", n = 1, expand = True).get(1)
   cols_to_drop = ['user', 'text']
   for item in cols_to_drop[:]:
     if item not in tick_df.columns:
@@ -432,9 +466,9 @@ def assign_likely_gender(row):
 
 
 
-def make_all_user_dict(area_df = area_df):
+def make_all_user_dict(area_df, area_name):
     """
-    This function takes the area with stats dataframe and returns a dataframe of all of the unique users and a dictionary version of that dataframe. 
+    This function takes the area with stats dataframe and returns a dataframe of all of the unique users and a dictionary version of that dataframe.
     """
     unique_user_df = (
         area_df[['user.id', 'user.name']]
@@ -444,11 +478,15 @@ def make_all_user_dict(area_df = area_df):
     )
 
     unique_user_df['user.id'] = unique_user_df['user.id'].astype(int)
+
+    occurrence_counts = area_df['user.id'].dropna().astype(int).value_counts()
+    unique_user_df[f"{area_name} occurences"] = unique_user_df['user.id'].map(occurrence_counts)
+    unique_user_df = unique_user_df.sort_values(f"{area_name} occurences", ascending=False)
+
     unique_user_df['user_dict'] = unique_user_df.apply(user_apply_func, axis=1)
     unique_user_df.set_index('user.id', inplace=True)
     all_user_dict = unique_user_df['user_dict'].to_dict()
 
     print(f"Unique users found: {len(all_user_dict)}")
-
 
     return unique_user_df, all_user_dict 
