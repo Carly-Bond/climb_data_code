@@ -1,4 +1,5 @@
 import copy
+from collections import Counter
 import glob
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
@@ -476,3 +477,99 @@ def plot_female_vs_male_rating(area_df, min_counts=3, gender_column='likely_gend
     plt.show()
 
     print(fm_df[['female_avg', 'male_avg', 'diff']].round(2))
+
+
+def analyze_comments_by_gender_rating(
+    area_df,
+    gender_column='likely_gender',
+    min_ratings=3,
+    diff_threshold=0.5,
+    high_threshold=3.0,
+    low_threshold=1.5,
+    top_n=20,
+):
+    FEMALE_LABELS = ['female', 'mostly_female']
+    MALE_LABELS = ['male', 'mostly_male']
+
+    female_df = area_df[area_df[gender_column].isin(FEMALE_LABELS)]
+    male_df = area_df[area_df[gender_column].isin(MALE_LABELS)]
+
+    female_counts = female_df.groupby('Route')['score'].count()
+    male_counts = male_df.groupby('Route')['score'].count()
+    qualified = female_counts.index[
+        (female_counts >= min_ratings) &
+        (male_counts.reindex(female_counts.index, fill_value=0) >= min_ratings)
+    ]
+
+    female_avg = female_df[female_df['Route'].isin(qualified)].groupby('Route')['score'].mean()
+    male_avg = male_df[male_df['Route'].isin(qualified)].groupby('Route')['score'].mean()
+
+    fm_df = pd.DataFrame({'female_avg': female_avg, 'male_avg': male_avg})
+    fm_df['diff'] = fm_df['female_avg'] - fm_df['male_avg']
+
+    def _categorize(row):
+        if row['diff'] >= diff_threshold:
+            return 'female_higher'
+        elif row['diff'] <= -diff_threshold:
+            return 'male_higher'
+        elif row['female_avg'] >= high_threshold and row['male_avg'] >= high_threshold:
+            return 'both_high'
+        elif row['female_avg'] < low_threshold and row['male_avg'] < low_threshold:
+            return 'both_low'
+        else:
+            return 'both_medium'
+
+    fm_df['category'] = fm_df.apply(_categorize, axis=1)
+
+    area_with_cat = area_df.merge(
+        fm_df[['category']], left_on='Route', right_index=True, how='inner'
+    )
+    comments_by_cat = (
+        area_with_cat[
+            area_with_cat['comment'].notna() &
+            (area_with_cat['comment'].str.strip() != '')
+        ]
+        .groupby('category')['comment']
+        .apply(list)
+    )
+
+    STOPWORDS = {
+        'a', 'an', 'the', 'and', 'or', 'but', 'i', 'it', 'to', 'of', 'in', 'is',
+        'on', 'at', 'with', 'for', 'this', 'was', 'did', 'we', 'had', 'my',
+        'so', 'up', 'be', 'by', 'not', 'me', 'as', 'out', 'just', 'from', 'some',
+        'very', 'got', 'get', 'its', 'are', 'then', 'than', 'no', 'first', 'again'
+    }
+
+    def _tokenize(texts):
+        words = []
+        for t in texts:
+            words.extend(re.findall(r"[a-z']+", t.lower()))
+        return [w for w in words if len(w) >= 3 and w not in STOPWORDS]
+
+    freq_by_cat = {}
+    for cat, comments in comments_by_cat.items():
+        tokens = _tokenize(comments)
+        total = len(tokens)
+        counts = Counter(tokens)
+        freq_by_cat[cat] = {w: c / total for w, c in counts.most_common(200)}
+
+    CATEGORY_ORDER = ['female_higher', 'male_higher', 'both_high', 'both_medium', 'both_low']
+    rows = []
+    for cat in CATEGORY_ORDER:
+        if cat not in freq_by_cat:
+            continue
+        top = sorted(freq_by_cat[cat], key=freq_by_cat[cat].get, reverse=True)[:top_n]
+        for rank, word in enumerate(top, 1):
+            rows.append({
+                'category': cat,
+                'rank': rank,
+                'word': word,
+                'freq': round(freq_by_cat[cat][word], 4),
+            })
+
+    keyword_df = pd.DataFrame(rows)
+    print(fm_df['category'].value_counts().reindex(CATEGORY_ORDER, fill_value=0).to_string())
+    print()
+    pivot = keyword_df.pivot(index='rank', columns='category', values='word')
+    print(pivot.reindex(columns=CATEGORY_ORDER).to_string())
+    return keyword_df, fm_df
